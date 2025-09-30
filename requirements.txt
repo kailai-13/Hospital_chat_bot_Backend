@@ -13,10 +13,10 @@ pydantic==2.5.0
 firebase-admin==6.2.0
 
 # LangChain and AI - COMPATIBLE VERSIONS
-langchain==0.1.20
-langchain-community==0.0.38
-langchain-groq==0.1.9
-langchain-core==0.1.53
+langchain
+langchain-community
+langchain-groq
+langchain-core
 
 # Vector Store and Embeddings
 faiss-cpu==1.7.4
