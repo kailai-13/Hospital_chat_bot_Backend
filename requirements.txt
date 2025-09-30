@@ -1,18 +1,27 @@
-# Core Framework - MINIMAL WORKING VERSION
+# FastAPI and Web Framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
+gunicorn==21.2.0
 
 # Authentication
 PyJWT==2.8.0
 python-dotenv==1.0.0
 pydantic==2.5.0
 
-# Firebase
+# Firebase Integration
 firebase-admin==6.2.0
 
-# AI - Use only what's needed
-groq==0.32.0
+# LangChain and AI - COMPATIBLE VERSIONS
+langchain==0.1.20
+langchain-community==0.0.38
+langchain-groq==0.1.9
+langchain-core==0.1.53
 
-# Basic utilities
+# Vector Store and Embeddings
+faiss-cpu==1.7.4
+sentence-transformers==2.2.2
+
+# Document Processing
+pypdf2==3.0.1
 requests==2.31.0
