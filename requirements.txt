@@ -25,3 +25,5 @@ sentence-transformers==2.2.2
 # Document Processing
 pypdf2==3.0.1
 requests==2.31.0
+pypdf
+unstructured
