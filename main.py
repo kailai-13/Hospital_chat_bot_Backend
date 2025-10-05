@@ -636,7 +636,7 @@ if os.getenv("RENDER"):
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "https://hospital-chat-bot-frontend.vercel.app/",  # Update with your actual frontend URL
+            "https://hospital-chat-bot-frontend.vercel.app",  # Update with your actual frontend URL
             "https://your-custom-domain.com",           # Add your custom domain if any
             "http://localhost:5173",                    # Keep for development
         ],
