@@ -1,16 +1,17 @@
 import os
 import tempfile
-import time
 import gc
 from datetime import datetime, timedelta
 from typing import Optional, List
+
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
 import firebase_admin
 from firebase_admin import credentials, storage
-from dotenv import load_dotenv
 
 import jwt
 from jwt.exceptions import InvalidTokenError
@@ -23,28 +24,43 @@ from langchain_groq import ChatGroq
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 
+# =========================================================================
+# CONFIGURATION
+# =========================================================================
 load_dotenv()
+
+FRONTEND_URLS = [
+    "https://hospital-chat-bot-frontend.vercel.app",
+]
+# You may add "http://localhost:5173" for local dev.
+
+MAX_DOCS = int(os.getenv("MAX_DOCS", "2"))
+MAX_CHUNKS = int(os.getenv("MAX_CHUNKS", "300"))
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "250"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "40"))
 
 app = FastAPI(
     title="KG Hospital AI Chatbot API", 
     version="1.0.0",
-    description="AI-powered chatbot system for KG Hospital with role-based access control"
+    description="AI-powered chatbot system for KG Hospital (optimized for Render free plan)"
 )
-security = HTTPBearer()
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
+    allow_origins=FRONTEND_URLS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+security = HTTPBearer()
+
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "kg-hospital-secret-key-2024")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
+ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8h
 
-# Firebase setup
+# =========================================================================
+# FIREBASE INITIALIZATION
+# =========================================================================
 try:
     if not firebase_admin._apps:
         firebase_config = {
@@ -58,18 +74,22 @@ try:
             "token_uri": "https://oauth2.googleapis.com/token",
         }
         cred = credentials.Certificate(firebase_config)
-        firebase_admin.initialize_app(cred, {'storageBucket': f"{firebase_config['project_id']}.firebasestorage.app"})
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': f"{firebase_config['project_id']}.firebasestorage.app"
+        })
     bucket = storage.bucket()
     FIREBASE_INITIALIZED = True
-    print("✅ Firebase initialized successfully")
 except Exception as e:
-    print(f"❌ Firebase initialization failed: {e}")
+    print(f"❌ Firebase init failed: {e}")
     FIREBASE_INITIALIZED = False
 
 vectorstore = None
 conversation_chain = None
 loaded_documents = []
 
+# =========================================================================
+# DATAMODELS
+# =========================================================================
 class UserLogin(BaseModel):
     username: str
     password: str
@@ -95,8 +115,11 @@ USERS_DB = {
     "visitor1": {"username": "visitor1", "password": "visitor123", "role": "visitor", "full_name": "Hospital Visitor"}
 }
 
-def verify_password(plain_password: str, stored_password: str) -> bool:
-    return plain_password == stored_password
+# =========================================================================
+# AUTHENTICATION FUNCTIONS
+# =========================================================================
+def verify_password(plain: str, stored: str) -> bool:
+    return plain == stored
 
 def authenticate_user(username, password):
     user = USERS_DB.get(username)
@@ -112,7 +135,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
         encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
         return encoded_jwt
     except Exception as e:
-        print(f"JWT encoding error: {e}")
+        print(f"JWT error: {e}")
         raise HTTPException(status_code=500, detail="Token creation failed")
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -142,16 +165,16 @@ def require_admin_role(current_user: dict = Depends(verify_token)):
         )
     return current_user
 
-# --------------- Document Processing (Memory Optimized) --------------
-
+# =========================================================================
+# DOCUMENT FUNCTIONS (MEMORY OPTIMIZED)
+# =========================================================================
 def load_document(file_path: str):
-    documents = []
     file_name = os.path.basename(file_path)
     try:
         loader = PyPDFLoader(file_path)
         documents = loader.load()
         if documents:
-            print(f"✅ Loaded {file_name} using PyPDFLoader")
+            print(f"✅ {file_name} loaded (PyPDFLoader)")
             return documents
     except Exception as e:
         print(f"⚠️ PyPDFLoader failed for {file_name}: {e}")
@@ -159,34 +182,25 @@ def load_document(file_path: str):
         loader = UnstructuredPDFLoader(file_path)
         documents = loader.load()
         if documents:
-            print(f"✅ Loaded {file_name} using UnstructuredPDFLoader")
+            print(f"✅ {file_name} loaded (UnstructuredPDFLoader)")
             return documents
     except Exception as e:
         print(f"⚠️ UnstructuredPDFLoader failed for {file_name}: {e}")
-    raise Exception(f"❌ All PDF processing methods failed for {file_name}")
+    raise Exception(f"❌ PDF failed: {file_name}")
 
 def setup_vectorstore(documents):
-    if not documents:
-        raise ValueError("No documents provided for vectorstore creation")
-    print(f"📄 Processing {len(documents)} document pages...")
-    text_splitter = CharacterTextSplitter(
-        separator='\n',
-        chunk_size=250,         # lower chunk size
-        chunk_overlap=40,
-        length_function=len
+    print(f"📄 Processing {len(documents)} pages...")
+    splitter = CharacterTextSplitter(
+        separator='\n', chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, length_function=len
     )
-    doc_chunks = text_splitter.split_documents(documents)
-    doc_chunks = doc_chunks[:300]  # hardcap for free tier
-    print(f"📝 Created {len(doc_chunks)} text chunks (capped for Render free plan)")
-
+    doc_chunks = splitter.split_documents(documents)[:MAX_CHUNKS]
+    print(f"📝 {len(doc_chunks)} chunks made (max {MAX_CHUNKS})")
     embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",  # smallest supported
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
         model_kwargs={'device': 'cpu'},
         encode_kwargs={'normalize_embeddings': True}
     )
-    print("🔄 Creating vector store...")
     vectorstore = FAISS.from_documents(doc_chunks, embeddings)
-    print("✅ Vector store created successfully!")
     gc.collect()
     return vectorstore
 
@@ -209,11 +223,11 @@ def upload_file_to_firebase(file_path: str, file_name: str):
     try:
         blob = bucket.blob(f"documents/{file_name}")
         blob.upload_from_filename(file_path)
-        print(f"✅ Uploaded {file_name} to Firebase Storage")
-        return True, f"File '{file_name}' uploaded successfully"
+        print(f"✅ Uploaded {file_name} to Firebase")
+        return True, f"File '{file_name}' uploaded"
     except Exception as e:
         print(f"❌ Upload failed for {file_name}: {e}")
-        return False, f"Upload failed: {str(e)}"
+        return False, str(e)
 
 def list_firebase_files():
     if not FIREBASE_INITIALIZED:
@@ -231,7 +245,7 @@ def list_firebase_files():
                 })
         return files_info
     except Exception as e:
-        print(f"❌ Error listing files: {e}")
+        print(f"❌ File list error: {e}")
         return []
 
 def download_firebase_file(file_name: str):
@@ -253,36 +267,35 @@ def download_firebase_file(file_name: str):
 def reload_all_documents():
     global vectorstore, conversation_chain, loaded_documents
     print("🔄 Reloading all documents from Firebase...")
-    firebase_files = list_firebase_files()
-    if not firebase_files:
-        return False, "No documents found in Firebase"
-    # Limit to first two PDFs only for memory safety
-    files_to_process = firebase_files[:2]
+    firebase_files = list_firebase_files()[:MAX_DOCS]  # only first N docs
     all_documents = []
     successful_loads = 0
-    for file_info in files_to_process:
+    for file_info in firebase_files:
         file_name = file_info['name']
         print(f"📥 Processing {file_name}...")
         temp_file_path = download_firebase_file(file_name)
         if temp_file_path:
             try:
-                documents = load_document(temp_file_path)
-                all_documents.extend(documents)
+                docs = load_document(temp_file_path)
+                all_documents.extend(docs)
                 successful_loads += 1
                 os.remove(temp_file_path)
             except Exception as e:
-                print(f"❌ Failed to process {file_name}: {e}")
+                print(f"❌ Failed: {file_name}: {e}")
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path)
     if all_documents:
-        print(f"📚 Total documents loaded: {len(all_documents)}")
+        print(f"📚 {len(all_documents)} docs loaded")
         vectorstore = setup_vectorstore(all_documents)
         conversation_chain = create_chain(vectorstore)
         loaded_documents = all_documents
         gc.collect()
-        return True, f"Successfully loaded {successful_loads} out of {len(files_to_process)} documents"
-    return False, "No documents could be processed"
+        return True, f"{successful_loads} of {len(firebase_files)} documents loaded"
+    return False, "No documents loaded"
 
+# =========================================================================
+# API ENDPOINTS
+# =========================================================================
 @app.get("/")
 async def root():
     return {
@@ -308,7 +321,7 @@ async def login(user_credentials: UserLogin):
             data={"sub": user["username"], "role": user["role"]},
             expires_delta=access_token_expires
         )
-        print(f"✅ User {user['username']} logged in successfully")
+        print(f"✅ User {user['username']} logged in")
         return {
             "access_token": access_token,
             "token_type": "bearer",
@@ -336,17 +349,17 @@ async def verify_auth(current_user: dict = Depends(verify_token)):
 async def chat(message: ChatMessage, current_user: dict = Depends(verify_token)):
     global conversation_chain
     try:
-        print(f"💬 Chat request from {current_user['username']} ({current_user['role']}): {message.message}")
+        print(f"💬 Chat ({current_user['role']}): {message.message}")
         if conversation_chain:
             response = conversation_chain.invoke({'question': message.message})
             answer = response.get('answer', 'I could not find relevant information.')
         else:
             llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
             system_prompts = {
-                "patient": "You are ... Always be compassionate and professional.",
-                "visitor": "You are ... Be welcoming and informative.",
-                "staff": "You are ... Be efficient and professional.",
-                "admin": "You are ... Be comprehensive and analytical."
+                "patient": "You are a helpful assistant for patients. Respond with compassion and clarity.",
+                "visitor": "You are a helpful assistant for visitors. Respond helpfully and politely.",
+                "staff":   "You are a helpful assistant for hospital staff. Be precise and professional.",
+                "admin":   "You are a helpful assistant for administrators. Give comprehensive, analytical answers."
             }
             system_prompt = system_prompts.get(message.user_role, system_prompts["patient"])
             full_prompt = f"{system_prompt}\n\nUser Question: {message.message}\n\nResponse:"
@@ -379,13 +392,13 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
             os.remove(temp_file_path)
             if reload_success:
                 return {
-                    "message": f"Document uploaded and processed successfully: {message}",
+                    "message": f"Document uploaded & processed: {message}",
                     "reload_status": reload_message,
                     "filename": file.filename
                 }
             else:
                 return {
-                    "message": f"Document uploaded but processing failed: {reload_message}",
+                    "message": f"Uploaded but processing failed: {reload_message}",
                     "filename": file.filename
                 }
         else:
@@ -439,24 +452,11 @@ async def system_status():
 
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 Starting KG Hospital Chatbot API...")
-    print(f"🔧 Firebase Status: {'✅ Connected' if FIREBASE_INITIALIZED else '❌ Not Connected'}")
-    # No auto-load on startup; use admin API to trigger reload when needed.
-    print("🎉 KG Hospital Chatbot API is ready!")
+    print("🚀 KG Hospital Chatbot API backend ready!")
+    print(f"🔧 Firebase: {'✅' if FIREBASE_INITIALIZED else '❌'}")
+    print("⚡ No document vectorstore loaded at startup (admin triggers reload).")
 
 PORT = int(os.getenv("PORT", 8000))
-if os.getenv("RENDER"):
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "https://hospital-chat-bot-frontend.vercel.app",
-            "https://your-custom-domain.com",
-            "http://localhost:5173",
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
 if __name__ == "__main__":
     import uvicorn
