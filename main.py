@@ -1,14 +1,21 @@
-# main.py - Optimized for Render Deployment (No Auth)
+# main.py - Complete Fixed Version
 
 import os
 import tempfile
-from datetime import datetime
-from fastapi import FastAPI, HTTPException, UploadFile, File
+import time
+from datetime import datetime, timedelta
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import firebase_admin
 from firebase_admin import credentials, storage
 from dotenv import load_dotenv
+
+# Fixed JWT imports
+import jwt
+from jwt.exceptions import InvalidTokenError
 
 # LangChain imports
 from langchain_community.document_loaders import UnstructuredPDFLoader, PyPDFLoader
@@ -26,32 +33,25 @@ load_dotenv()
 
 app = FastAPI(
     title="KG Hospital AI Chatbot API", 
-    version="2.0.0",
-    description="AI-powered chatbot system for KG Hospital"
+    version="1.0.0",
+    description="AI-powered chatbot system for KG Hospital with role-based access control"
 )
 
-# Get port from environment variable (Render sets this)
-PORT = int(os.getenv("PORT", 8000))
+security = HTTPBearer()
 
-# CORS Configuration - Production Ready
-ALLOWED_ORIGINS = [
-    "https://hospital-chat-bot-frontend-9ds2.vercel.app",
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://localhost:3001",
-]
-
-# Add wildcard for development if not in production
-if not os.getenv("RENDER"):
-    ALLOWED_ORIGINS.append("*")
-
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# JWT Configuration
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "kg-hospital-secret-key-2024")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 
 # Initialize Firebase Admin SDK
 try:
@@ -87,13 +87,116 @@ loaded_documents = []
 # =============================================================================
 # PYDANTIC MODELS
 # =============================================================================
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
 class ChatMessage(BaseModel):
     message: str
-    user_role: str = "patient"  # Default role
+    user_role: str
 
 class ChatResponse(BaseModel):
     response: str
     timestamp: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    role: str
+    username: str
+
+# =============================================================================
+# USER DATABASE
+# =============================================================================
+USERS_DB = {
+    "admin": {
+        "username": "admin",
+        "password": "admin123",
+        "role": "admin",
+        "full_name": "Administrator"
+    },
+    "staff1": {
+        "username": "staff1",
+        "password": "staff123",
+        "role": "staff",
+        "full_name": "Hospital Staff"
+    },
+    "patient1": {
+        "username": "patient1", 
+        "password": "patient123",
+        "role": "patient",
+        "full_name": "Patient User"
+    },
+    "visitor1": {
+        "username": "visitor1",
+        "password": "visitor123", 
+        "role": "visitor",
+        "full_name": "Hospital Visitor"
+    }
+}
+
+# =============================================================================
+# AUTHENTICATION FUNCTIONS - COMPLETELY FIXED
+# =============================================================================
+def verify_password(plain_password: str, stored_password: str) -> bool:
+    """Simple password verification."""
+    return plain_password == stored_password
+
+def authenticate_user(username: str, password: str):
+    """Authenticate user credentials."""
+    user = USERS_DB.get(username)
+    if not user:
+        return False
+    if not verify_password(password, user["password"]):
+        return False
+    return user
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Create JWT access token."""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    
+    to_encode.update({"exp": expire})
+    
+    try:
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
+    except Exception as e:
+        print(f"JWT encoding error: {e}")
+        raise HTTPException(status_code=500, detail="Token creation failed")
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Verify JWT token."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        role: str = payload.get("role")
+        if username is None:
+            raise credentials_exception
+        return {"username": username, "role": role}
+    except InvalidTokenError:
+        raise credentials_exception
+    except Exception as e:
+        print(f"Token verification error: {e}")
+        raise credentials_exception
+
+def require_admin_role(current_user: dict = Depends(verify_token)):
+    """Require admin role for protected endpoints."""
+    if current_user["role"] != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    return current_user
 
 # =============================================================================
 # DOCUMENT PROCESSING FUNCTIONS
@@ -292,27 +395,62 @@ async def root():
     return {
         "message": "KG Hospital AI Chatbot API", 
         "status": "running",
-        "version": "2.0.0",
+        "version": "1.0.0",
         "firebase_initialized": FIREBASE_INITIALIZED,
-        "documents_loaded": len(loaded_documents) > 0,
-        "environment": "production" if os.getenv("RENDER") else "development"
+        "documents_loaded": len(loaded_documents) > 0
     }
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for monitoring."""
+@app.post("/auth/login", response_model=Token)
+async def login(user_credentials: UserLogin):
+    """User login endpoint."""
+    try:
+        user = authenticate_user(user_credentials.username, user_credentials.password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user["username"], "role": user["role"]},
+            expires_delta=access_token_expires
+        )
+        
+        print(f"✅ User {user['username']} logged in successfully")
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "role": user["role"],
+            "username": user["username"]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Login error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Login processing failed"
+        )
+
+@app.get("/auth/verify")
+async def verify_auth(current_user: dict = Depends(verify_token)):
+    """Verify authentication token."""
     return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+        "username": current_user["username"], 
+        "role": current_user["role"],
+        "authenticated": True
     }
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(message: ChatMessage):
-    """Public chat endpoint with role-based responses."""
+async def chat(message: ChatMessage, current_user: dict = Depends(verify_token)):
+    """Chat endpoint with role-based responses."""
     global conversation_chain
     
     try:
-        print(f"💬 Chat request ({message.user_role}): {message.message}")
+        print(f"💬 Chat request from {current_user['username']} ({current_user['role']}): {message.message}")
         
         if conversation_chain:
             response = conversation_chain.invoke({'question': message.message})
@@ -368,16 +506,19 @@ async def chat(message: ChatMessage):
     except Exception as e:
         print(f"❌ Chat error: {str(e)}")
         raise HTTPException(
-            status_code=500, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Error generating response: {str(e)}"
         )
 
-@app.post("/upload-document")
-async def upload_document(file: UploadFile = File(...)):
-    """Public document upload endpoint."""
+@app.post("/admin/upload-document")
+async def upload_document(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(require_admin_role)
+):
+    """Admin-only document upload endpoint."""
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only PDF files are allowed"
         )
     
@@ -408,16 +549,22 @@ async def upload_document(file: UploadFile = File(...)):
                 }
         else:
             os.remove(temp_file_path)
-            raise HTTPException(status_code=500, detail=message)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=message
+            )
             
     except Exception as e:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Upload failed: {str(e)}"
+        )
 
-@app.get("/documents")
-async def list_documents():
-    """Public endpoint to list all documents."""
+@app.get("/admin/documents")
+async def list_documents(current_user: dict = Depends(require_admin_role)):
+    """Admin-only endpoint to list all documents."""
     documents = list_firebase_files()
     return {
         "documents": documents, 
@@ -425,9 +572,9 @@ async def list_documents():
         "firebase_status": FIREBASE_INITIALIZED
     }
 
-@app.post("/reload-documents")
-async def reload_documents_endpoint():
-    """Public endpoint to reload all documents."""
+@app.post("/admin/reload-documents")
+async def reload_documents_endpoint(current_user: dict = Depends(require_admin_role)):
+    """Admin-only endpoint to reload all documents."""
     success, message = reload_all_documents()
     if success:
         return {
@@ -436,7 +583,10 @@ async def reload_documents_endpoint():
             "documents_loaded": len(loaded_documents)
         }
     else:
-        raise HTTPException(status_code=500, detail=message)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=message
+        )
 
 @app.get("/system/status")
 async def system_status():
@@ -447,7 +597,6 @@ async def system_status():
         "vectorstore_ready": vectorstore is not None,
         "conversation_chain_ready": conversation_chain is not None,
         "groq_api_configured": bool(os.getenv("GROQ_API_KEY")),
-        "environment": "production" if os.getenv("RENDER") else "development",
         "timestamp": datetime.now().isoformat()
     }
 
@@ -458,7 +607,6 @@ async def system_status():
 async def startup_event():
     """Initialize the application on startup."""
     print("🚀 Starting KG Hospital Chatbot API...")
-    print(f"🌐 Environment: {'Production (Render)' if os.getenv('RENDER') else 'Development'}")
     print(f"🔧 Firebase Status: {'✅ Connected' if FIREBASE_INITIALIZED else '❌ Not Connected'}")
     
     if FIREBASE_INITIALIZED:
@@ -474,6 +622,28 @@ async def startup_event():
 # =============================================================================
 # MAIN
 # =============================================================================
+# =============================================================================
+# PRODUCTION CONFIGURATION
+# =============================================================================
+import os
+
+# Get port from environment variable (Render sets this)
+PORT = int(os.getenv("PORT", 8000))
+
+# Configure CORS for production
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://hospital-chat-bot-frontend-9ds2.vercel.app/",  # Update with your actual frontend URL
+        "https://your-custom-domain.com",           # Add your custom domain if any
+        "http://localhost:5173",                    # Keep for development
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    )
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
