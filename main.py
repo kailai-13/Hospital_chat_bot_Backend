@@ -22,7 +22,7 @@ from langchain.chains import ConversationalRetrievalChain
 
 load_dotenv()
 
-FRONTEND_URLS = ["https://hospital-chat-bot-frontend.vercel.app"]
+FRONTEND_URLS = ["https://hospital-chat-bot-frontend-9ds2.vercel.app"]
 
 MAX_DOCS = int(os.getenv("MAX_DOCS", "2"))
 MAX_CHUNKS = int(os.getenv("MAX_CHUNKS", "300"))
