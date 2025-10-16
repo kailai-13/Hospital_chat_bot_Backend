@@ -1,16 +1,14 @@
 # FastAPI and Web Framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-gunicorn==21.2.0
+fastapi
+uvicorn[standard]
+python-multipart
+gunicorn
 
 # Authentication
-PyJWT==2.8.0
-python-dotenv==1.0.0
-pydantic==2.5.0
+PyJWT
+python-dotenv
+pydantic
 
-# Firebase Integration
-firebase-admin==6.2.0
 
 # LangChain and AI - COMPATIBLE VERSIONS
 langchain
@@ -18,15 +16,20 @@ langchain-community
 langchain-groq
 langchain-core
 
-# Vector Store and Embeddings
-faiss-cpu==1.7.4
-sentence-transformers==2.2.2
+# Vector Store andmbeddings
+faiss-cpu
+sentence-transformers
 
 # Document Processing
-pypdf2==3.0.1
-requests==2.31.0
+pypdf2
+requests
 pypdf
 unstructured
-sentence-transformers==2.2.2
-huggingface-hub==0.19.4
+sentence-transformers
+huggingface-hub
 pdfminer.six
+
+# Web Scraping and Automation
+apscheduler
+beautifulsoup4
+playwright
